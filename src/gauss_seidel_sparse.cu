@@ -1,12 +1,17 @@
 #include "gauss_seidel_sparse.cuh"
+#include <array>
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/time.h>
-#include <time.h>
+#include <driver_types.h>
+// #include <helper_cuda.h>
+#include <iostream>
+#include <set>
+#include <tuple>
+#include <unordered_set>
+#include <vector>
+
+// helper functions and utilities to work with CUDA
 
 #define CHECK(call)                                                            \
     {                                                                          \
@@ -30,158 +35,31 @@
         }                                                                      \
     }
 
-struct csr_matrix
+csr_matrix::csr_matrix(const char* filename) {}
+
+csr_matrix::~csr_matrix() {}
+
+auto get_max_iterations(csr_matrix matrix)
 {
-public:
-    int* row_ptr;
-    int* col_ind;
-    float* values;
-    float* matrix_diagonal;
-    int num_rows;
-    int num_cols;
-    int num_vals;
+    std::set<size_t> sf_dependant_idx;
+    std::set<size_t> sb_dependant_idx;
 
-    csr_matrix(const char* filename)
+    for (int i = 0; i > matrix.num_rows; i++)
     {
-        // copy read_matrix_function
-    }
-
-    virtual ~csr_matrix()
-    {
-        // destroy pointers
-    }
-};
-
-// Reads a sparse matrix and represents it using CSR (Compressed Sparse Row)
-// format
-void read_matrix(int** row_ptr, int** col_ind, float** values,
-                 float** matrixDiagonal, const char* filename, int* num_rows,
-                 int* num_cols, int* num_vals)
-{
-    FILE* file = fopen(filename, "r");
-    if (file == NULL)
-    {
-        fprintf(stdout, "File cannot be opened!\n");
-        exit(0);
-    }
-    // Get number of rows, columns, and non-zero values
-    if (fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals) == EOF)
-        printf("Error reading file");
-
-    int* row_ptr_t = (int*)malloc((*num_rows + 1) * sizeof(int));
-    int* col_ind_t = (int*)malloc(*num_vals * sizeof(int));
-    float* values_t = (float*)malloc(*num_vals * sizeof(float));
-    float* matrixDiagonal_t = (float*)malloc(*num_rows * sizeof(float));
-    // Collect occurances of each row for determining the indices of row_ptr
-    int* row_occurances = (int*)malloc(*num_rows * sizeof(int));
-    for (int i = 0; i < *num_rows; i++)
-    {
-        row_occurances[i] = 0;
-    }
-
-    int row, column;
-    float value;
-    while (fscanf(file, "%d %d %f\n", &row, &column, &value) != EOF)
-    {
-        // Subtract 1 from row and column indices to match C format
-        row--;
-        column--;
-        row_occurances[row]++;
-    }
-
-    // Set row_ptr
-    int index = 0;
-    for (int i = 0; i < *num_rows; i++)
-    {
-        row_ptr_t[i] = index;
-        index += row_occurances[i];
-    }
-    row_ptr_t[*num_rows] = *num_vals;
-    free(row_occurances);
-
-    // Set the file position to the beginning of the file
-    rewind(file);
-
-    // Read the file again, save column indices and values
-    for (int i = 0; i < *num_vals; i++)
-    {
-        col_ind_t[i] = -1;
-    }
-
-    if (fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals) == EOF)
-        printf("Error reading file");
-
-    int i = 0, j = 0;
-    while (fscanf(file, "%d %d %f\n", &row, &column, &value) != EOF)
-    {
-        row--;
-        column--;
-
-        // Find the correct index (i + row_ptr_t[row]) using both row
-        // information and an index i
-        while (col_ind_t[i + row_ptr_t[row]] != -1)
-        {
-            i++;
-        }
-        col_ind_t[i + row_ptr_t[row]] = column;
-        values_t[i + row_ptr_t[row]] = value;
-        if (row == column)
-        {
-            matrixDiagonal_t[j] = value;
-            j++;
-        }
-        i = 0;
-    }
-    fclose(file);
-    *row_ptr = row_ptr_t;
-    *col_ind = col_ind_t;
-    *values = values_t;
-    *matrixDiagonal = matrixDiagonal_t;
-}
-
-// CPU implementation of SYMGS using CSR, DO NOT CHANGE THIS
-void symgs_csr_sw(const int* row_ptr, const int* col_ind, const float* values,
-                  const int num_rows, float* x, float* matrixDiagonal)
-{
-
-    // forward sweep
-    for (int i = 0; i < num_rows; i++)
-    {
-        float sum = x[i];
-        const int row_start = row_ptr[i];
-        const int row_end = row_ptr[i + 1];
-        float currentDiagonal = matrixDiagonal[i]; // Current diagonal value
+        const int row_end = matrix.row_ptr[i + 1];
+        const int row_start = matrix.row_ptr[i];
 
         for (int j = row_start; j < row_end; j++)
         {
-            sum -= values[j] * x[col_ind[j]];
+            if (matrix.col_ind[j] < i)
+                sf_dependant_idx.insert(matrix.col_ind[j]);
+            else
+                break;
+            // check if also sweeb back counter is needed
         }
-
-        sum +=
-            x[i] *
-            currentDiagonal; // Remove diagonal contribution from previous loop
-
-        x[i] = sum / currentDiagonal;
     }
-
-    // backward sweep
-    for (int i = num_rows - 1; i >= 0; i--)
-    {
-        float sum = x[i];
-        const int row_start = row_ptr[i];
-        const int row_end = row_ptr[i + 1];
-        float currentDiagonal = matrixDiagonal[i]; // Current diagonal value
-
-        for (int j = row_start; j < row_end; j++)
-        {
-            sum -= values[j] * x[col_ind[j]];
-        }
-        sum +=
-            x[i] *
-            currentDiagonal; // Remove diagonal contribution from previous loop
-
-        x[i] = sum / currentDiagonal;
-    }
+    return std::tuple{sf_dependant_idx.size(),
+                      matrix.num_rows - sf_dependant_idx.size()};
 }
 
 __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
@@ -198,37 +76,48 @@ __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
     float sum = vector[row];
     float current_diagonal = matrix_diagonal[row];
 
-    while (true)
+    for (int j = row_start; j < row_end; j++)
     {
-        bool dependency_conflict = false;
-        for (int j = row_start; j < row_end; j++)
-        {
-            if (col_ind[j] < 0)
-                continue;
-            if (col_ind[j] < row && !dependant_locks[col_ind[j]])
-            {
-                dependency_conflict = true;
-                break;
-            }
-            sum -= matrix[j] * vector[col_ind[j]];
-        }
-
-        if (!dependency_conflict)
-        {
-            sum += vector[row] * current_diagonal;
-            vector[row] = sum / current_diagonal;
-            dependant_locks[row] = true;
+        if (col_ind[j] < 0)
+            continue;
+        if (col_ind[j] < row && !dependant_locks[col_ind[j]])
             return;
-        }
 
-        // sync
+        sum -= matrix[j] * vector[col_ind[j]];
     }
+
+    sum += vector[row] * current_diagonal;
+    vector[row] = sum / current_diagonal;
+    dependant_locks[row] = true;
 }
 
 __global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
-                               const float* matrix_values, const int* num_rows,
-                               float* matrix_diagonal)
+                               const float* matrix, const int num_rows,
+                               float* matrix_diagonal, float* vector,
+                               bool* dependant_locks)
 {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row > num_rows)
+        return;
+
+    int row_start = row_ptr[row];
+    int row_end = row_ptr[row + 1];
+    float sum = vector[row];
+    float current_diagonal = matrix_diagonal[row];
+
+    for (int j = row_start; j < row_end; j++)
+    {
+        if (col_ind[j] < 0)
+            continue;
+        if (col_ind[j] > row && !dependant_locks[col_ind[j]])
+            return;
+
+        sum -= matrix[j] * vector[col_ind[j]];
+    }
+
+    sum += vector[row] * current_diagonal;
+    vector[row] = sum / current_diagonal;
+    dependant_locks[row] = true;
 }
 
 __global__ void sweep_forward_decorporated(const int* row_ptr,
@@ -246,8 +135,37 @@ __global__ void sweep_back_decorporated(const int* row_ptr, const int* col_ind,
 {
 }
 
-void gauss_seidel_sparse_solve()
+template <typename T, size_t size>
+void gauss_seidel_sparse_solve(csr_matrix matrix, std::array<T, size> vector,
+                               int device)
 {
+
+    int *dev_row_ptr, *dev_col_ind;
+    T *dev_matrix, *dev_vector, *dev_matrix_diagonal;
+    bool* dev_dependant_locks;
+
+    int driver_version = 0;
+    int memory_pools = 0;
+    cudaDeviceGetAttribute(&memory_pools, cudaDevAttrMemoryPoolsSupported,
+                           device);
+    cudaDriverGetVersion(&driver_version);
+
+    constexpr int blocks = ceil(size / 128);
+    dim3 threads_per_block(128, 1, 1);
+    dim3 blocks_per_grid(blocks, 1, 1);
+
+    if (driver_version < 11040 && !memory_pools)
+    {
+        // cuda graph
+    }
+    else
+    {
+        sweep_forward_all<<<blocks_per_grid, threads_per_block>>>(
+            dev_row_ptr, dev_col_ind, dev_matrix, size, dev_matrix_diagonal,
+            vector.data(), dev_dependant_locks);
+
+        // kernel call to check if all locks == 1
+    }
 
     /*
     --- function for checking if all elements in cuda array is 0

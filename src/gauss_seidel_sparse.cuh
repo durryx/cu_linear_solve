@@ -1,3 +1,4 @@
+#include <iostream>
 
 void read_matrix(int** row_ptr, int** col_ind, float** values,
                  float** matrixDiagonal, const char* filename, int* num_rows,
@@ -21,5 +22,5 @@ public:
 
     csr_matrix(const char* filename);
 
-    virtual ~csr_matrix();
+    ~csr_matrix();
 };
