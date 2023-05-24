@@ -39,12 +39,13 @@ csr_matrix::csr_matrix(const char* filename) {}
 
 csr_matrix::~csr_matrix() {}
 
-auto get_max_iterations(csr_matrix matrix)
+// iterate over columns to find unique indices less than row number
+auto get_max_iterations(csr_matrix& matrix)
 {
     std::set<size_t> sf_dependant_idx;
     std::set<size_t> sb_dependant_idx;
 
-    for (int i = 0; i > matrix.num_rows; i++)
+    for (int i = 0; i < matrix.num_rows; i++)
     {
         const int row_end = matrix.row_ptr[i + 1];
         const int row_start = matrix.row_ptr[i];
@@ -58,8 +59,27 @@ auto get_max_iterations(csr_matrix matrix)
             // check if also sweeb back counter is needed
         }
     }
-    return std::tuple{sf_dependant_idx.size(),
-                      matrix.num_rows - sf_dependant_idx.size()};
+    return sf_dependant_idx.size();
+}
+
+__global__ void count_indipendant_rows(const int* row_ptr, const int* col_ind,
+                                       const float* matrix, const int num_rows,
+                                       int* indipendant_rows)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row > num_rows)
+        return;
+
+    int row_start = row_ptr[row];
+    // int row_end = row_ptr[row + 1];
+
+    if (col_ind[row_start] < 0)
+    {
+        return;
+        // check whether to row_start++
+    }
+    if (col_ind[row_start] >= row)
+        atomicAdd(indipendant_rows, 1);
 }
 
 __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
@@ -140,9 +160,31 @@ void gauss_seidel_sparse_solve(csr_matrix matrix, std::array<T, size> vector,
                                int device)
 {
 
-    int *dev_row_ptr, *dev_col_ind;
+    int *dev_row_ptr, *dev_col_ind, *dev_ind_rows;
     T *dev_matrix, *dev_vector, *dev_matrix_diagonal;
     bool* dev_dependant_locks;
+
+    CHECK(cudaMalloc(&dev_row_ptr, (matrix.num_rows + 1) * sizeof(int)));
+    CHECK(cudaMalloc(&dev_col_ind, matrix.num_vals * sizeof(int)));
+    CHECK(cudaMalloc(&dev_ind_rows, sizeof(int)));
+    CHECK(cudaMalloc(&dev_matrix, matrix.num_vals * sizeof(T)));
+    CHECK(cudaMalloc(&dev_vector, matrix.num_rows * sizeof(T)));
+    CHECK(cudaMalloc(&dev_matrix_diagonal, matrix.num_rows * sizeof(T)));
+    CHECK(cudaMalloc(&dev_dependant_locks, matrix.num_rows * sizeof(bool)));
+
+    CHECK(cudaMemcpy(dev_row_ptr, matrix.row_ptr,
+                     (matrix.num_rows + 1) * sizeof(int),
+                     cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_col_ind, matrix.col_ind, matrix.num_vals * sizeof(int),
+                     cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_matrix, matrix.values, matrix.num_vals * sizeof(T),
+                     cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_vector, vector.data(), matrix.num_rows * sizeof(T),
+                     cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dev_matrix_diagonal, matrix.matrix_diagonal,
+                     matrix.num_rows * sizeof(T), cudaMemcpyHostToDevice));
+    CHECK(cudaMemset(dev_ind_rows, 0, sizeof(int)));
+    CHECK(cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
 
     int driver_version = 0;
     int memory_pools = 0;
@@ -160,12 +202,29 @@ void gauss_seidel_sparse_solve(csr_matrix matrix, std::array<T, size> vector,
     }
     else
     {
-        sweep_forward_all<<<blocks_per_grid, threads_per_block>>>(
-            dev_row_ptr, dev_col_ind, dev_matrix, size, dev_matrix_diagonal,
-            vector.data(), dev_dependant_locks);
+        count_indipendant_rows<<<blocks_per_grid, threads_per_block>>>(
+            dev_row_ptr, dev_col_ind, dev_matrix, size, dev_ind_rows);
+        CHECK_KERNELCALL();
+        CHECK(cudaDeviceSynchronize());
+
+        int ind_rows = 0;
+        CHECK(cudaMemcpy(&ind_rows, dev_ind_rows, sizeof(int),
+                         cudaMemcpyDeviceToHost));
+        // wrong !! should check for null rows, they are indipendant
+        int tot_iterations = matrix.num_rows - 2 * ind_rows;
+
+        for (; tot_iterations >= 0; tot_iterations--)
+        {
+            sweep_forward_all<<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, dev_matrix, size, dev_matrix_diagonal,
+                vector.data(), dev_dependant_locks);
+        }
 
         // kernel call to check if all locks == 1
     }
+
+    CHECK(cudaMemcpy(vector.data(), dev_vector, matrix.num_rows * sizeof(T),
+                     cudaMemcpyDeviceToHost));
 
     /*
     --- function for checking if all elements in cuda array is 0

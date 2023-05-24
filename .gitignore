@@ -8,4 +8,7 @@ sample.cu
 save
 symgs-csr.cu
 symgs.c
+
 kmer_V4a.mtx
+build/*
+test/symgs_competitor
