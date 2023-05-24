@@ -1,16 +1,10 @@
+#include "../src/gauss_seidel_sparse.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
-
-
-double get_time()
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec * 1e-6;
-}
+#include <vector>
 
 // CPU implementation of SYMGS using CSR, DO NOT CHANGE THIS
 void symgs_csr_sw(const int* row_ptr, const int* col_ind, const float* values,
@@ -57,93 +51,6 @@ void symgs_csr_sw(const int* row_ptr, const int* col_ind, const float* values,
     }
 }
 
-// Reads a sparse matrix and represents it using CSR (Compressed Sparse Row)
-// format
-void read_matrix(int** row_ptr, int** col_ind, float** values,
-                 float** matrixDiagonal, const char* filename, int* num_rows,
-                 int* num_cols, int* num_vals)
-{
-    FILE* file = fopen(filename, "r");
-    if (file == NULL)
-    {
-        fprintf(stdout, "File cannot be opened!\n");
-        exit(0);
-    }
-    // Get number of rows, columns, and non-zero values
-    if (fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals) == EOF)
-        printf("Error reading file");
-
-    int* row_ptr_t = (int*)malloc((*num_rows + 1) * sizeof(int));
-    int* col_ind_t = (int*)malloc(*num_vals * sizeof(int));
-    float* values_t = (float*)malloc(*num_vals * sizeof(float));
-    float* matrixDiagonal_t = (float*)malloc(*num_rows * sizeof(float));
-    // Collect occurances of each row for determining the indices of row_ptr
-    int* row_occurances = (int*)malloc(*num_rows * sizeof(int));
-    for (int i = 0; i < *num_rows; i++)
-    {
-        row_occurances[i] = 0;
-    }
-
-    int row, column;
-    float value;
-    while (fscanf(file, "%d %d %f\n", &row, &column, &value) != EOF)
-    {
-        // Subtract 1 from row and column indices to match C format
-        row--;
-        column--;
-        row_occurances[row]++;
-    }
-
-    // Set row_ptr
-    int index = 0;
-    for (int i = 0; i < *num_rows; i++)
-    {
-        row_ptr_t[i] = index;
-        index += row_occurances[i];
-    }
-    row_ptr_t[*num_rows] = *num_vals;
-    free(row_occurances);
-
-    // Set the file position to the beginning of the file
-    rewind(file);
-
-    // Read the file again, save column indices and values
-    for (int i = 0; i < *num_vals; i++)
-    {
-        col_ind_t[i] = -1;
-    }
-
-    if (fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals) == EOF)
-        printf("Error reading file");
-
-    int i = 0, j = 0;
-    while (fscanf(file, "%d %d %f\n", &row, &column, &value) != EOF)
-    {
-        row--;
-        column--;
-
-        // Find the correct index (i + row_ptr_t[row]) using both row
-        // information and an index i
-        while (col_ind_t[i + row_ptr_t[row]] != -1)
-        {
-            i++;
-        }
-        col_ind_t[i + row_ptr_t[row]] = column;
-        values_t[i + row_ptr_t[row]] = value;
-        if (row == column)
-        {
-            matrixDiagonal_t[j] = value;
-            j++;
-        }
-        i = 0;
-    }
-    fclose(file);
-    *row_ptr = row_ptr_t;
-    *col_ind = col_ind_t;
-    *values = values_t;
-    *matrixDiagonal = matrixDiagonal_t;
-}
-
 int main(int argc, const char* argv[])
 {
     if (argc != 2)
@@ -161,25 +68,19 @@ int main(int argc, const char* argv[])
     double start_cpu, end_cpu;
     double start_gpu, end_gpu;
 
-    read_matrix(&row_ptr, &col_ind, &values, &matrixDiagonal, filename,
-                &num_rows, &num_cols, &num_vals);
-    float* x = (float*)malloc(num_rows * sizeof(float));
-    float* xCopy = (float*)malloc(num_rows * sizeof(float));
+    csr_matrix matrix(filename);
+    std::vector<float> vector(matrix.num_rows);
 
     // Generate a random vector
     srand(time(NULL));
-    for (int i = 0; i < num_rows; i++)
+    for (int i = 0; i < matrix.num_rows; i++)
     {
-        x[i] = (float)(rand() % 100) /
-               (float)(rand() % 100 + 1); // the number we use to divide cannot
-                                          // be 0, that's the reason of the +1
-        xCopy[i] = x[i];
+        vector[i] =
+            (float)(rand() % 100) /
+            (float)(rand() % 100 + 1); // the number we use to divide cannot
+                                       // be 0, that's the reason of the +1
     }
 
-    // ############################ cpu part ############################
-    start_cpu = get_time();
-    symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
-    end_cpu = get_time();
-
-    // ############################ cpu part ############################
+    symgs_csr_sw(matrix.row_ptr, matrix.col_ind, matrix.values, matrix.num_rows,
+                 vector.data(), matrix.matrix_diagonal);
 }

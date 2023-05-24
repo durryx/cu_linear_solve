@@ -1,17 +1,12 @@
 #include "gauss_seidel_sparse.cuh"
-#include <array>
+#include "gauss_seidel_sparse.hpp"
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
+#include <vector>
 // #include <helper_cuda.h>
 #include <iostream>
-#include <set>
-#include <tuple>
-#include <unordered_set>
-#include <vector>
-
-// helper functions and utilities to work with CUDA
 
 #define CHECK(call)                                                            \
     {                                                                          \
@@ -35,35 +30,8 @@
         }                                                                      \
     }
 
-csr_matrix::csr_matrix(const char* filename) {}
-
-csr_matrix::~csr_matrix() {}
-
-// iterate over columns to find unique indices less than row number
-auto get_max_iterations(csr_matrix& matrix)
-{
-    std::set<size_t> sf_dependant_idx;
-    std::set<size_t> sb_dependant_idx;
-
-    for (int i = 0; i < matrix.num_rows; i++)
-    {
-        const int row_end = matrix.row_ptr[i + 1];
-        const int row_start = matrix.row_ptr[i];
-
-        for (int j = row_start; j < row_end; j++)
-        {
-            if (matrix.col_ind[j] < i)
-                sf_dependant_idx.insert(matrix.col_ind[j]);
-            else
-                break;
-            // check if also sweeb back counter is needed
-        }
-    }
-    return sf_dependant_idx.size();
-}
-
 __global__ void count_indipendant_rows(const int* row_ptr, const int* col_ind,
-                                       const float* matrix, const int num_rows,
+                                       const int num_rows,
                                        int* indipendant_rows)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -71,20 +39,19 @@ __global__ void count_indipendant_rows(const int* row_ptr, const int* col_ind,
         return;
 
     int row_start = row_ptr[row];
-    // int row_end = row_ptr[row + 1];
-
     if (col_ind[row_start] < 0)
     {
         return;
         // check whether to row_start++
     }
-    if (col_ind[row_start] >= row)
+    if (col_ind[row_start] < row)
         atomicAdd(indipendant_rows, 1);
 }
 
+template <typename T>
 __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
-                                  const float* matrix, const int num_rows,
-                                  float* matrix_diagonal, float* vector,
+                                  const T* matrix, const int num_rows,
+                                  T* matrix_diagonal, T* vector,
                                   bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -93,8 +60,8 @@ __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
 
     int row_start = row_ptr[row];
     int row_end = row_ptr[row + 1];
-    float sum = vector[row];
-    float current_diagonal = matrix_diagonal[row];
+    T sum = vector[row];
+    T current_diagonal = matrix_diagonal[row];
 
     for (int j = row_start; j < row_end; j++)
     {
@@ -111,9 +78,10 @@ __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
     dependant_locks[row] = true;
 }
 
+template <typename T>
 __global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
-                               const float* matrix, const int num_rows,
-                               float* matrix_diagonal, float* vector,
+                               const T* matrix, const int num_rows,
+                               T* matrix_diagonal, T* vector,
                                bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -122,8 +90,8 @@ __global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
 
     int row_start = row_ptr[row];
     int row_end = row_ptr[row + 1];
-    float sum = vector[row];
-    float current_diagonal = matrix_diagonal[row];
+    T sum = vector[row];
+    T current_diagonal = matrix_diagonal[row];
 
     for (int j = row_start; j < row_end; j++)
     {
@@ -155,11 +123,11 @@ __global__ void sweep_back_decorporated(const int* row_ptr, const int* col_ind,
 {
 }
 
-template <typename T, size_t size>
-void gauss_seidel_sparse_solve(csr_matrix matrix, std::array<T, size> vector,
+template <typename T>
+void gauss_seidel_sparse_solve(csr_matrix matrix, std::vector<T> vector,
                                int device)
 {
-
+    int size = vector.size();
     int *dev_row_ptr, *dev_col_ind, *dev_ind_rows;
     T *dev_matrix, *dev_vector, *dev_matrix_diagonal;
     bool* dev_dependant_locks;
@@ -192,25 +160,25 @@ void gauss_seidel_sparse_solve(csr_matrix matrix, std::array<T, size> vector,
                            device);
     cudaDriverGetVersion(&driver_version);
 
-    constexpr int blocks = ceil(size / 128);
+    int blocks = ceil(size / 128);
     dim3 threads_per_block(128, 1, 1);
     dim3 blocks_per_grid(blocks, 1, 1);
 
-    if (driver_version < 11040 && !memory_pools)
+    if (driver_version < 11040 && !memory_pools || 1)
     {
         // cuda graph
     }
     else
     {
         count_indipendant_rows<<<blocks_per_grid, threads_per_block>>>(
-            dev_row_ptr, dev_col_ind, dev_matrix, size, dev_ind_rows);
+            dev_row_ptr, dev_col_ind, size, dev_ind_rows);
         CHECK_KERNELCALL();
         CHECK(cudaDeviceSynchronize());
 
         int ind_rows = 0;
         CHECK(cudaMemcpy(&ind_rows, dev_ind_rows, sizeof(int),
                          cudaMemcpyDeviceToHost));
-        // wrong !! should check for null rows, they are indipendant
+        // TO-FIX should check for null rows, they are indipendant
         int tot_iterations = matrix.num_rows - 2 * ind_rows;
 
         for (; tot_iterations >= 0; tot_iterations--)
