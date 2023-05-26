@@ -124,7 +124,7 @@ __global__ void sweep_back_decorporated(const int* row_ptr, const int* col_ind,
 }
 
 template <typename T>
-void gauss_seidel_sparse_solve(csr_matrix matrix, std::vector<T> vector,
+void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                                int device)
 {
     int size = vector.size();
@@ -164,7 +164,7 @@ void gauss_seidel_sparse_solve(csr_matrix matrix, std::vector<T> vector,
     dim3 threads_per_block(128, 1, 1);
     dim3 blocks_per_grid(blocks, 1, 1);
 
-    if (driver_version < 11040 && !memory_pools || 1)
+    if (driver_version < 11040 && !memory_pools && 0)
     {
         // cuda graph
     }

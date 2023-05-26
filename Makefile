@@ -41,9 +41,12 @@ $(BUILD_DIR)/$(BINARY): $(OBJS)
 ### tests ###
 test:
 	$(info see ./test directory for tests)
-	@echo "execute this: ${CUDA_PATH}/extras/compute-sanitizer/compute-sanitizer ./${BINARY} kmer_V4a.mtx";
-	@echo "debug cuda kernerls with: cuda-gdb --args ${BINARY} kmer_V4a.mtx"
+	@echo "execute this: ${CUDA_PATH}/extras/compute-sanitizer/compute-sanitizer ./${BINARY} ../kmer_V4a.mtx";
+	@echo "debug cuda kernerls with: cuda-gdb --args ${BINARY} ../kmer_V4a.mtx"
+	@echo "profiling: ${CUDA_PATH}/nsight_systems/bin/nsys-ui ${BINARY} ../kmer_V4a.mtx"
+	@echo "profiling: ${CUDA_PATH}/nsight_compute/ncu-ui ${BINARY} ../kmer_V4a.mtx"
 	cd test && $(MAKE)
+
 
 ### other ###
 clean:

@@ -12,3 +12,4 @@ symgs.c
 kmer_V4a.mtx
 build/*
 test/symgs_competitor
+gauss_seidel_performance

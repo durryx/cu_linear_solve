@@ -353,6 +353,7 @@ int main(int argc, const char* argv[])
 
     // ############################ cpu part ############################
     start_cpu = get_time();
+    printf("rows: %d\n", num_rows);
     symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
     end_cpu = get_time();
 
