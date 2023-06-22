@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <assert.h>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <ranges>
 #include <set>
 #include <tuple>
 #include <utility>
+
 // uncomment to disable assert()
 // #define NDEBUG
 
@@ -28,7 +30,6 @@ auto get_different_results(const std::vector<T>& cpu_solution,
         if (!(cpu_solution[i] == gpu_solution[i]))
             err_indices.emplace_back(i);
     }
-
     return err_indices;
 }
 
@@ -233,4 +234,16 @@ auto get_max_iterations(struct csr_matrix& matrix)
         }
     }
     return sf_dependant_idx.size();
+}
+
+typedef std::chrono::high_resolution_clock::time_point time_var;
+
+template <typename F, typename... Args>
+double function_time(F func, Args&&... args)
+{
+    time_var t1 = std::chrono::high_resolution_clock::now();
+    func(std::forward<Args>(args)...);
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::high_resolution_clock::now() - t1)
+        .count();
 }

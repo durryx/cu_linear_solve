@@ -30,22 +30,48 @@
         }                                                                      \
     }
 
-__global__ void count_indipendant_rows(const int* row_ptr, const int* col_ind,
-                                       const int num_rows,
-                                       int* indipendant_rows)
+/*
+set terminated to true
+after this function check if terminated is true
+else keep iterating
+__global__ void check_row_locks(const int* row_ptr, const int* col_ind,
+                                const int num_rows, bool* dependant_locks,
+                                bool* terminated)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row > num_rows)
         return;
 
-    int row_start = row_ptr[row];
-    if (col_ind[row_start] < 0)
+    if (dependant_locks[row] == false)
     {
-        return;
-        // check whether to row_start++
+        atomicExch(terminated, 0);
+        __threadfence();
+        asm("trap;");
     }
-    if (col_ind[row_start] < row)
-        atomicAdd(indipendant_rows, 1);
+}
+*/
+
+__global__ void rows_lock_check(const int* row_ptr, const int* col_ind,
+                                const int num_rows, bool* dependant_locks,
+                                bool* not_terminated)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < num_rows)
+        return;
+
+    volatile __shared__ bool warp_found;
+    if (threadIdx.x == 0)
+        warp_found = *not_terminated;
+    __syncthreads();
+
+    if (dependant_locks[row] == false)
+    {
+        warp_found = true;
+        *not_terminated = true;
+    }
+
+    if (threadIdx.x == 0 && *not_terminated)
+        warp_found = true;
 }
 
 template <typename T>
@@ -55,7 +81,9 @@ __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
                                   bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row > num_rows)
+    if (row < num_rows)
+        return;
+    if (dependant_locks[row] == true)
         return;
 
     int row_start = row_ptr[row];
@@ -85,7 +113,9 @@ __global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
                                bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row > num_rows)
+    if (row < num_rows)
+        return;
+    if (dependant_locks[row] == true)
         return;
 
     int row_start = row_ptr[row];
@@ -127,18 +157,17 @@ template <typename T>
 void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                                int device)
 {
-    int size = vector.size();
-    int *dev_row_ptr, *dev_col_ind, *dev_ind_rows;
+    int *dev_row_ptr, *dev_col_ind;
     T *dev_matrix, *dev_vector, *dev_matrix_diagonal;
-    bool* dev_dependant_locks;
+    bool *dev_dependant_locks, *dev_terminated;
 
     CHECK(cudaMalloc(&dev_row_ptr, (matrix.num_rows + 1) * sizeof(int)));
     CHECK(cudaMalloc(&dev_col_ind, matrix.num_vals * sizeof(int)));
-    CHECK(cudaMalloc(&dev_ind_rows, sizeof(int)));
     CHECK(cudaMalloc(&dev_matrix, matrix.num_vals * sizeof(T)));
     CHECK(cudaMalloc(&dev_vector, matrix.num_rows * sizeof(T)));
     CHECK(cudaMalloc(&dev_matrix_diagonal, matrix.num_rows * sizeof(T)));
     CHECK(cudaMalloc(&dev_dependant_locks, matrix.num_rows * sizeof(bool)));
+    CHECK(cudaMalloc(&dev_terminated, sizeof(bool)));
 
     CHECK(cudaMemcpy(dev_row_ptr, matrix.row_ptr,
                      (matrix.num_rows + 1) * sizeof(int),
@@ -151,8 +180,8 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                      cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_matrix_diagonal, matrix.matrix_diagonal,
                      matrix.num_rows * sizeof(T), cudaMemcpyHostToDevice));
-    CHECK(cudaMemset(dev_ind_rows, 0, sizeof(int)));
     CHECK(cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
+    CHECK(cudaMemset(dev_terminated, 0, sizeof(bool)));
 
     int driver_version = 0;
     int memory_pools = 0;
@@ -160,7 +189,7 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                            device);
     cudaDriverGetVersion(&driver_version);
 
-    int blocks = ceil(size / 128);
+    int blocks = ceil(matrix.num_rows / 128);
     dim3 threads_per_block(128, 1, 1);
     dim3 blocks_per_grid(blocks, 1, 1);
 
@@ -170,67 +199,91 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
     }
     else
     {
-        count_indipendant_rows<<<blocks_per_grid, threads_per_block>>>(
-            dev_row_ptr, dev_col_ind, size, dev_ind_rows);
-        CHECK_KERNELCALL();
-        CHECK(cudaDeviceSynchronize());
-
-        int ind_rows = 0;
-        CHECK(cudaMemcpy(&ind_rows, dev_ind_rows, sizeof(int),
-                         cudaMemcpyDeviceToHost));
-        // TO-FIX should check for null rows, they are indipendant
-        int tot_iterations = matrix.num_rows - 2 * ind_rows;
-
-        for (; tot_iterations >= 0; tot_iterations--)
+        bool not_terminated = true;
+        while (not_terminated)
         {
+            not_terminated = false;
             sweep_forward_all<<<blocks_per_grid, threads_per_block>>>(
-                dev_row_ptr, dev_col_ind, dev_matrix, size, dev_matrix_diagonal,
-                vector.data(), dev_dependant_locks);
+                dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
+                dev_matrix_diagonal, dev_vector, dev_dependant_locks);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+
+            rows_lock_check<<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, matrix.num_rows, dev_dependant_locks,
+                dev_terminated);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+
+            CHECK(cudaMemcpy(&not_terminated, dev_terminated, sizeof(bool),
+                             cudaMemcpyDeviceToHost));
         }
 
-        // kernel call to check if all locks == 1
+        CHECK(
+            cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
+        CHECK(cudaMemset(dev_terminated, 0, sizeof(bool)));
+        not_terminated = true;
+
+        while (not_terminated)
+        {
+            not_terminated = false;
+            sweep_back_all<<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
+                dev_matrix_diagonal, dev_vector, dev_dependant_locks);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+
+            rows_lock_check<<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, matrix.num_rows, dev_dependant_locks,
+                dev_terminated);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+
+            CHECK(cudaMemcpy(&not_terminated, dev_terminated, sizeof(bool),
+                             cudaMemcpyDeviceToHost));
+        }
     }
 
     CHECK(cudaMemcpy(vector.data(), dev_vector, matrix.num_rows * sizeof(T),
                      cudaMemcpyDeviceToHost));
-
-    /*
-    --- function for checking if all elements in cuda array is 0
-    def
-
-
-    --- incorporated in kernel if buffers supports all rows---
-    array with to_process_rows = 0
-    launch kernel:
-        while(True)
-            if is_processabale
-                process and set index = 1
-                return (or break)
-            syncronize
-        (process backward sweep same way?)
-
-
-    --- decorporated from kernel if not enought memory ---
-    use -1 or NaN for invalid
-    todo_rows array = all rows
-    while(True)
-        (passing todo_rows) launch kernel:
-            using (for all threads 1,2,3) get row index
-            if(not valid)
-                return
-            if(row_can_be_completed)
-                process and save set to 1 completed_indeces
-                execute all_rows_compled_arrays
-            return
-        check if it is completed and end
-        recalculate todo_rows array with completes_indices
-        # if(not kernel: all_rows_are_completed_array)
-        #     break
-
-
-    --- ---
-    function composition in cuda
-    cuda graphs from decorporated method
-
-    */
 }
+
+/*
+--- function for checking if all elements in cuda array is 0
+def
+
+
+--- incorporated in kernel if buffers supports all rows---
+array with to_process_rows = 0
+launch kernel:
+    while(True)
+        if is_processabale
+            process and set index = 1
+            return (or break)
+        syncronize
+    (process backward sweep same way?)
+
+
+--- decorporated from kernel if not enought memory ---
+use -1 or NaN for invalid
+todo_rows array = all rows
+while(True)
+    (passing todo_rows) launch kernel:
+        using (for all threads 1,2,3) get row index
+        if(not valid)
+            return
+        if(row_can_be_completed)
+            process and save set to 1 completed_indeces
+            execute all_rows_compled_arrays
+        return
+    check if it is completed and end
+    recalculate todo_rows array with completes_indices
+    # if(not kernel: all_rows_are_completed_array)
+    #     break
+
+
+--- ---
+function composition in cuda
+cuda graphs from decorporated method
+
+*/

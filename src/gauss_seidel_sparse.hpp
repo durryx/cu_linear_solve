@@ -17,7 +17,4 @@ public:
     ~csr_matrix();
 };
 
-template <typename T>
-void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector);
-
 auto get_max_iterations(struct csr_matrix& matrix);
