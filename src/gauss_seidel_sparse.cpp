@@ -27,7 +27,7 @@ auto get_different_results(const std::vector<T>& cpu_solution,
     std::vector<size_t> err_indices;
     for (size_t i = 0; i < cpu_solution.size(); i++)
     {
-        if (!(cpu_solution[i] == gpu_solution[i]))
+        if (cpu_solution[i] != gpu_solution[i])
             err_indices.emplace_back(i);
     }
     return err_indices;

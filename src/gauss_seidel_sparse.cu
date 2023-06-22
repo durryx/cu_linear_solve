@@ -51,8 +51,7 @@ __global__ void check_row_locks(const int* row_ptr, const int* col_ind,
 }
 */
 
-__global__ void rows_lock_check(const int* row_ptr, const int* col_ind,
-                                const int num_rows, bool* dependant_locks,
+__global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
                                 bool* not_terminated)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -74,10 +73,95 @@ __global__ void rows_lock_check(const int* row_ptr, const int* col_ind,
         warp_found = true;
 }
 
+// process more than one
+template <typename T, size_t n>
+__global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
+                                const T* matrix, const int num_rows,
+                                const T* matrix_diagonal, T* vector,
+                                bool* dependant_locks)
+{
+    int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
+    if (index + n - 1 < num_rows)
+        return;
+
+    for (size_t i = 0; i < n; i++)
+    {
+        if (dependant_locks[i] == true)
+            return;
+
+        int row_start = row_ptr[i];
+        int row_end = row_ptr[i + 1];
+        T sum = vector[i];
+        T current_diagonal = matrix_diagonal[i];
+
+        bool skip_row = false;
+        for (int j = row_start; j < row_end; j++)
+        {
+            if (col_ind[j] < 0)
+                continue;
+            if (col_ind[j] < i && !dependant_locks[col_ind[j]])
+            {
+                skip_row = true;
+                break;
+            }
+            sum -= matrix[j] * vector[col_ind[j]];
+        }
+        if (skip_row)
+            continue;
+
+        sum += vector[i] * current_diagonal;
+        vector[i] = sum / current_diagonal;
+        dependant_locks[i] = true;
+    }
+}
+
+template <typename T, size_t n>
+__global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
+                             const T* matrix, const int num_rows,
+                             const T* matrix_diagonal, T* vector,
+                             bool* dependant_locks)
+{
+    int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
+    if (index + n - 1 < num_rows)
+        return;
+
+    for (size_t i = 0; i < n; i++)
+    {
+        if (dependant_locks[i] == true)
+            return;
+
+        int row_start = row_ptr[i];
+        int row_end = row_ptr[i + 1];
+        T sum = vector[i];
+        T current_diagonal = matrix_diagonal[i];
+
+        bool skip_row = false;
+        for (int j = row_start; j < row_end; j++)
+        {
+            if (col_ind[j] < 0)
+                continue;
+            if (col_ind[j] > i && !dependant_locks[col_ind[j]])
+            {
+                skip_row = true;
+                break;
+            }
+            sum -= matrix[j] * vector[col_ind[j]];
+        }
+        if (skip_row)
+            continue;
+
+        sum += vector[i] * current_diagonal;
+        vector[i] = sum / current_diagonal;
+        dependant_locks[i] = true;
+    }
+}
+
+//
+
 template <typename T>
 __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
                                   const T* matrix, const int num_rows,
-                                  T* matrix_diagonal, T* vector,
+                                  const T* matrix_diagonal, T* vector,
                                   bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -109,7 +193,7 @@ __global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
 template <typename T>
 __global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
                                const T* matrix, const int num_rows,
-                               T* matrix_diagonal, T* vector,
+                               const T* matrix_diagonal, T* vector,
                                bool* dependant_locks)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -189,7 +273,8 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                            device);
     cudaDriverGetVersion(&driver_version);
 
-    int blocks = ceil(matrix.num_rows / 128);
+    constexpr size_t n = 30;
+    int blocks = ceil(matrix.num_rows / (n * 128));
     dim3 threads_per_block(128, 1, 1);
     dim3 blocks_per_grid(blocks, 1, 1);
 
@@ -203,15 +288,14 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
         while (not_terminated)
         {
             not_terminated = false;
-            sweep_forward_all<<<blocks_per_grid, threads_per_block>>>(
+            sweep_forward_n<T, n><<<blocks_per_grid, threads_per_block>>>(
                 dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
                 dev_matrix_diagonal, dev_vector, dev_dependant_locks);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
             rows_lock_check<<<blocks_per_grid, threads_per_block>>>(
-                dev_row_ptr, dev_col_ind, matrix.num_rows, dev_dependant_locks,
-                dev_terminated);
+                matrix.num_rows, dev_dependant_locks, dev_terminated);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
@@ -227,15 +311,14 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
         while (not_terminated)
         {
             not_terminated = false;
-            sweep_back_all<<<blocks_per_grid, threads_per_block>>>(
+            sweep_back_n<T, n><<<blocks_per_grid, threads_per_block>>>(
                 dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
                 dev_matrix_diagonal, dev_vector, dev_dependant_locks);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
             rows_lock_check<<<blocks_per_grid, threads_per_block>>>(
-                dev_row_ptr, dev_col_ind, matrix.num_rows, dev_dependant_locks,
-                dev_terminated);
+                matrix.num_rows, dev_dependant_locks, dev_terminated);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
