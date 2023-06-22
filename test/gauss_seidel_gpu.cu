@@ -42,19 +42,17 @@ int main(int argc, const char* argv[])
     srand(time(NULL));
     for (int i = 0; i < matrix.num_rows; i++)
         vector[i] = (float)gen_random();
+    std::vector<float> cpu_sol = vector;
+    std::vector<float> gpu_sol = vector;
 
-    std::vector<float> cpu_sol(matrix.num_rows, .0F);
     time_var t1 = std::chrono::high_resolution_clock::now();
     symgs_csr_sw(matrix, cpu_sol);
     double cpu_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::high_resolution_clock::now() - t1)
                           .count();
 
-    std::vector<float> gpu_sol(matrix.num_rows, .0F);
     int device;
     cudaGetDevice(&device);
-
-    t1 = std::chrono::high_resolution_clock::now();
     gauss_seidel_sparse_solve(matrix, gpu_sol, device);
     double gpu_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::high_resolution_clock::now() - t1)
