@@ -5,8 +5,7 @@ CXXFLAGS=-fsanitize=memory -fsanitize=undefined -fsanitize=address -Wextra -Wall
 
 ### compiling ###
 gauss_seidel_performance: gauss_seidel_gpu.cu
-	nvcc -g -G -std=c++20 $^ -o $@ 
-# -DNDEBUG
+	nvcc -g -G -std=c++20 -DDEBUG_MODE=1 $^ -o $@ 
 	$(info run ./gauss_seidel_gpu ../kmer_V4a.mtx)
 
 symgs_competitor: symgs_competitor.cu

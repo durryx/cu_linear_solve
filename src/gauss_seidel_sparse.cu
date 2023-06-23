@@ -1,5 +1,4 @@
 #include "gauss_seidel_sparse.cuh"
-#include "gauss_seidel_sparse.hpp"
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -53,7 +52,7 @@ __global__ void check_row_locks(const int* row_ptr, const int* col_ind,
 
 template <typename T, size_t n>
 __global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
-                                bool* not_terminated)
+                                volatile bool* not_terminated)
 {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -65,7 +64,7 @@ __global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
     size_t i = 0;
     while (!warp_found && i < n)
     {
-        if (index + i < num_rows)
+        if (index + i >= num_rows)
             return;
 
         if (dependant_locks[index + i] == false)
@@ -90,25 +89,26 @@ __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
                                 bool* dependant_locks)
 {
     int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
-    if (index + n - 1 < num_rows)
-        return;
 
     for (size_t i = 0; i < n; i++)
     {
-        if (dependant_locks[i] == true)
+        if (index + i >= num_rows)
             return;
 
-        int row_start = row_ptr[i];
-        int row_end = row_ptr[i + 1];
-        T sum = vector[i];
-        T current_diagonal = matrix_diagonal[i];
+        if (dependant_locks[index + i] == true)
+            continue;
+
+        int row_start = row_ptr[index + i];
+        int row_end = row_ptr[index + i + 1];
+        T sum = vector[index + i];
+        T current_diagonal = matrix_diagonal[index + i];
 
         bool skip_row = false;
         for (int j = row_start; j < row_end; j++)
         {
             if (col_ind[j] < 0)
                 continue;
-            if (col_ind[j] < i && !dependant_locks[col_ind[j]])
+            if (col_ind[j] < (index + i) && !dependant_locks[col_ind[j]])
             {
                 skip_row = true;
                 break;
@@ -118,9 +118,9 @@ __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
         if (skip_row)
             continue;
 
-        sum += vector[i] * current_diagonal;
-        vector[i] = sum / current_diagonal;
-        dependant_locks[i] = true;
+        sum += vector[index + i] * current_diagonal;
+        vector[index + i] = sum / current_diagonal;
+        dependant_locks[index + i] = true;
     }
 }
 
@@ -131,25 +131,26 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
                              bool* dependant_locks)
 {
     int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
-    if (index + n - 1 < num_rows)
-        return;
 
     for (size_t i = 0; i < n; i++)
     {
-        if (dependant_locks[i] == true)
+        if (index + i >= num_rows)
             return;
 
-        int row_start = row_ptr[i];
-        int row_end = row_ptr[i + 1];
-        T sum = vector[i];
-        T current_diagonal = matrix_diagonal[i];
+        if (dependant_locks[index + i] == true)
+            continue;
+
+        int row_start = row_ptr[index + i];
+        int row_end = row_ptr[index + i + 1];
+        T sum = vector[index + i];
+        T current_diagonal = matrix_diagonal[index + i];
 
         bool skip_row = false;
         for (int j = row_end - 1; j < row_start; j--)
         {
             if (col_ind[j] < 0)
                 continue;
-            if (col_ind[j] > i && !dependant_locks[col_ind[j]])
+            if (col_ind[j] > (index + i) && !dependant_locks[col_ind[j]])
             {
                 skip_row = true;
                 break;
@@ -159,91 +160,10 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
         if (skip_row)
             continue;
 
-        sum += vector[i] * current_diagonal;
-        vector[i] = sum / current_diagonal;
-        dependant_locks[i] = true;
+        sum += vector[index + i] * current_diagonal;
+        vector[index + i] = sum / current_diagonal;
+        dependant_locks[index + i] = true;
     }
-}
-
-//
-
-template <typename T>
-__global__ void sweep_forward_all(const int* row_ptr, const int* col_ind,
-                                  const T* matrix, const int num_rows,
-                                  const T* matrix_diagonal, T* vector,
-                                  bool* dependant_locks)
-{
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < num_rows)
-        return;
-    if (dependant_locks[row] == true)
-        return;
-
-    int row_start = row_ptr[row];
-    int row_end = row_ptr[row + 1];
-    T sum = vector[row];
-    T current_diagonal = matrix_diagonal[row];
-
-    for (int j = row_start; j < row_end; j++)
-    {
-        if (col_ind[j] < 0)
-            continue;
-        if (col_ind[j] < row && !dependant_locks[col_ind[j]])
-            return;
-
-        sum -= matrix[j] * vector[col_ind[j]];
-    }
-
-    sum += vector[row] * current_diagonal;
-    vector[row] = sum / current_diagonal;
-    dependant_locks[row] = true;
-}
-
-template <typename T>
-__global__ void sweep_back_all(const int* row_ptr, const int* col_ind,
-                               const T* matrix, const int num_rows,
-                               const T* matrix_diagonal, T* vector,
-                               bool* dependant_locks)
-{
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < num_rows)
-        return;
-    if (dependant_locks[row] == true)
-        return;
-
-    int row_start = row_ptr[row];
-    int row_end = row_ptr[row + 1];
-    T sum = vector[row];
-    T current_diagonal = matrix_diagonal[row];
-
-    for (int j = row_start; j < row_end; j++)
-    {
-        if (col_ind[j] < 0)
-            continue;
-        if (col_ind[j] > row && !dependant_locks[col_ind[j]])
-            return;
-
-        sum -= matrix[j] * vector[col_ind[j]];
-    }
-
-    sum += vector[row] * current_diagonal;
-    vector[row] = sum / current_diagonal;
-    dependant_locks[row] = true;
-}
-
-__global__ void sweep_forward_decorporated(const int* row_ptr,
-                                           const int* col_ind,
-                                           const float* matrix_values,
-                                           const int* num_rows,
-                                           float* matrix_diagonal)
-{
-}
-
-__global__ void sweep_back_decorporated(const int* row_ptr, const int* col_ind,
-                                        const float* matrix_values,
-                                        const int* num_rows,
-                                        float* matrix_diagonal)
-{
 }
 
 template <typename T>
@@ -304,7 +224,6 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
-            // does not set dev_not_terminated to true
             rows_lock_check<T, n><<<blocks_per_grid, threads_per_block>>>(
                 matrix.num_rows, dev_dependant_locks, dev_not_terminated);
             CHECK_KERNELCALL();
@@ -312,6 +231,15 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
 
             CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(bool),
                              cudaMemcpyDeviceToHost));
+        }
+
+        if (DEBUG_MODE)
+        {
+            // dump not working
+            CHECK(cudaMemcpy(&vector[0], dev_vector,
+                             matrix.num_rows * sizeof(T),
+                             cudaMemcpyDeviceToHost));
+            dump_vector(vector, 100, "nvidia mode");
         }
 
         CHECK(

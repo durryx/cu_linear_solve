@@ -403,6 +403,7 @@ int main(int argc, const char* argv[])
     // divide forward and backward sweep into chunks, rerun each chunk until all
     // values have been found forward sweep
     int blocksToCompute = blockN;
+    int ciao = 0;
     for (int i = 0; i < CHUNKSN; i++)
     {
         int blocksInRound = blocksToCompute / (CHUNKSN - i);
@@ -424,7 +425,9 @@ int main(int argc, const char* argv[])
 
             CHECK(cudaMemcpy(&not_done, dev_not_done, sizeof(char),
                              cudaMemcpyDeviceToHost));
+            ciao++;
         } while (not_done);
+        printf("%d  ", ciao);
 
         blocksToCompute -= blocksInRound;
     }

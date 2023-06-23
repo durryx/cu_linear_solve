@@ -1,6 +1,5 @@
 #include "../src/gauss_seidel_sparse.cpp"
 #include "../src/gauss_seidel_sparse.cu"
-// #include <format>
 #include <random>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +8,8 @@
 #include <time.h>
 #include <vector>
 
-#ifdef NDEBUG
-#define DEBUG_OUTPUT 1
-#else
-#define DEBUG_OUTPUT 0
-#endif
+// compile with -DDEBUG_MODE=1 or define this macro variable
+// #define DEBUG_MODE 1
 
 typedef std::chrono::high_resolution_clock::time_point time_var;
 

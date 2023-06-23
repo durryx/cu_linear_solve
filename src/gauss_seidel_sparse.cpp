@@ -15,8 +15,11 @@
 #include <tuple>
 #include <utility>
 
-// uncomment to disable assert()
-// #define NDEBUG
+#ifdef NDEBUG
+#define DEBUG_OUTPUT 1
+#else
+#define DEBUG_OUTPUT 0
+#endif
 
 template <typename T>
 auto get_different_results(const std::vector<T>& cpu_solution,
@@ -31,6 +34,27 @@ auto get_different_results(const std::vector<T>& cpu_solution,
             err_indices.emplace_back(i);
     }
     return err_indices;
+}
+
+typedef std::chrono::high_resolution_clock::time_point time_var;
+
+template <typename F, typename... Args>
+double function_time(F func, Args&&... args)
+{
+    time_var t1 = std::chrono::high_resolution_clock::now();
+    func(std::forward<Args>(args)...);
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::high_resolution_clock::now() - t1)
+        .count();
+}
+
+template <typename T>
+void dump_vector(const std::vector<T>& vector, size_t n, const char* id)
+{
+    assert(vector.size() >= n);
+    std::cout << id << '\n';
+    for (size_t i = 0; i <= n; i += 2)
+        std::cout << vector[i] << "\t \t" << vector[i + 1] << '\n';
 }
 
 /*
@@ -192,6 +216,9 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
         vector[i] = sum / currentDiagonal;
     }
 
+    if (DEBUG_MODE)
+        dump_vector(vector, 100, "cpu mode");
+
     // backward sweep
     for (int i = matrix.num_rows - 1; i >= 0; i--)
     {
@@ -234,16 +261,4 @@ auto get_max_iterations(struct csr_matrix& matrix)
         }
     }
     return sf_dependant_idx.size();
-}
-
-typedef std::chrono::high_resolution_clock::time_point time_var;
-
-template <typename F, typename... Args>
-double function_time(F func, Args&&... args)
-{
-    time_var t1 = std::chrono::high_resolution_clock::now();
-    func(std::forward<Args>(args)...);
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::high_resolution_clock::now() - t1)
-        .count();
 }
