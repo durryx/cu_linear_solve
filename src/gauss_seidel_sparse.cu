@@ -6,6 +6,7 @@
 #include <vector>
 // #include <helper_cuda.h>
 #include <iostream>
+#include <type_traits>
 
 #define CHECK(call)                                                            \
     {                                                                          \
@@ -69,6 +70,7 @@ __global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
 
         if (dependant_locks[index + i] == false)
         {
+            // unreachable code backward sweep
             warp_found = true;
             *not_terminated = true;
         }
@@ -81,7 +83,6 @@ __global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
     }
 }
 
-// process more than one
 template <typename T, size_t n>
 __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
                                 const T* matrix, const int num_rows,
@@ -101,7 +102,6 @@ __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
         int row_start = row_ptr[index + i];
         int row_end = row_ptr[index + i + 1];
         T sum = vector[index + i];
-        T current_diagonal = matrix_diagonal[index + i];
 
         bool skip_row = false;
         for (int j = row_start; j < row_end; j++)
@@ -118,6 +118,7 @@ __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
         if (skip_row)
             continue;
 
+        T current_diagonal = matrix_diagonal[index + i];
         sum += vector[index + i] * current_diagonal;
         vector[index + i] = sum / current_diagonal;
         dependant_locks[index + i] = true;
@@ -143,15 +144,15 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
         int row_start = row_ptr[index + i];
         int row_end = row_ptr[index + i + 1];
         T sum = vector[index + i];
-        T current_diagonal = matrix_diagonal[index + i];
 
         bool skip_row = false;
-        for (int j = row_end - 1; j < row_start; j--)
+        for (int j = row_end - 1; j >= row_start; j--)
         {
             if (col_ind[j] < 0)
                 continue;
             if (col_ind[j] > (index + i) && !dependant_locks[col_ind[j]])
             {
+                // unreachable code
                 skip_row = true;
                 break;
             }
@@ -160,6 +161,7 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
         if (skip_row)
             continue;
 
+        T current_diagonal = matrix_diagonal[index + i];
         sum += vector[index + i] * current_diagonal;
         vector[index + i] = sum / current_diagonal;
         dependant_locks[index + i] = true;
@@ -235,11 +237,13 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
 
         if (DEBUG_MODE)
         {
-            // dump not working
+            static_assert(
+                std::is_same_v<decltype(vector[0]), decltype(*dev_vector)> ==
+                true);
             CHECK(cudaMemcpy(&vector[0], dev_vector,
                              matrix.num_rows * sizeof(T),
                              cudaMemcpyDeviceToHost));
-            dump_vector(vector, 100, "nvidia mode");
+            dump_vector(vector, 100, "nvidia mode sweep forward");
         }
 
         CHECK(
@@ -264,6 +268,14 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
 
             CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(bool),
                              cudaMemcpyDeviceToHost));
+        }
+
+        if (DEBUG_MODE)
+        {
+            CHECK(cudaMemcpy(&vector[0], dev_vector,
+                             matrix.num_rows * sizeof(T),
+                             cudaMemcpyDeviceToHost));
+            dump_vector(vector, 100, "nvidia mode backward sweep");
         }
     }
 

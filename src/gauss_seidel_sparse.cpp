@@ -9,17 +9,19 @@
 #include <assert.h>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <ranges>
 #include <set>
 #include <tuple>
 #include <utility>
 
-#ifdef NDEBUG
-#define DEBUG_OUTPUT 1
-#else
-#define DEBUG_OUTPUT 0
-#endif
+template <typename T>
+bool tolerant_comparison(T x, T y, int ulp)
+{
+    return std::abs(x - y) <= std::numeric_limits<T>::epsilon() *
+                                  std::max(std::abs(x), std::abs(y)) * ulp;
+}
 
 template <typename T>
 auto get_different_results(const std::vector<T>& cpu_solution,
@@ -30,7 +32,9 @@ auto get_different_results(const std::vector<T>& cpu_solution,
     std::vector<size_t> err_indices;
     for (size_t i = 0; i < cpu_solution.size(); i++)
     {
-        if (cpu_solution[i] != gpu_solution[i])
+        // if (cpu_solution[i] != gpu_solution[i])
+        //     err_indices.emplace_back(i);
+        if (tolerant_comparison(cpu_solution[i], gpu_solution[i], 1))
             err_indices.emplace_back(i);
     }
     return err_indices;
@@ -53,15 +57,16 @@ void dump_vector(const std::vector<T>& vector, size_t n, const char* id)
 {
     assert(vector.size() >= n);
     std::cout << id << '\n';
-    for (size_t i = 0; i <= n; i += 2)
-        std::cout << vector[i] << "\t \t" << vector[i + 1] << '\n';
+    for (size_t i = 0; i <= n; i += 3)
+        std::cout << vector[i] << "\t\t" << vector[i + 1] << "\t\t"
+                  << vector[i + 2] << '\n';
+    std::cout << '\n' << std::endl;
 }
 
 /*
-template <typename T, size_t solution_size>
-auto get_error_distribution_data(
-    const std::array<T, solution_size>& cpu_solution,
-    const std::array<T, solution_size>& gpu_solution)
+template <typename T>
+auto get_error_distribution_data(const std::vector<T>& cpu_solution,
+                                 const std::vector<T>& gpu_solution)
     -> std::tuple<double, double>
 {
     std::multiset<double> elements_errors;
@@ -180,6 +185,12 @@ csr_matrix::csr_matrix(const char* filename)
     num_rows = _num_rows[0];
     num_cols = _num_cols[0];
     num_vals = _num_vals[0];
+
+    if (DEBUG_MODE)
+    {
+        std::cout << "matrix information\nnum_rows: " << num_rows << "\n"
+                  << "num_vals: " << num_vals << '\n';
+    }
 }
 
 csr_matrix::~csr_matrix()
@@ -217,7 +228,7 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
     }
 
     if (DEBUG_MODE)
-        dump_vector(vector, 100, "cpu mode");
+        dump_vector(vector, 100, "cpu mode forward sweep");
 
     // backward sweep
     for (int i = matrix.num_rows - 1; i >= 0; i--)
@@ -238,6 +249,9 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
 
         vector[i] = sum / currentDiagonal;
     }
+
+    if (DEBUG_MODE)
+        dump_vector(vector, 100, "cpu mode backward sweep");
 }
 
 // iterate over columns to find unique indices less than row number

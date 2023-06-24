@@ -24,20 +24,15 @@ int main(int argc, const char* argv[])
 
     csr_matrix matrix(filename);
     std::vector<float> vector(matrix.num_rows, .0F);
-    if (DEBUG_OUTPUT)
-    {
-        std::cout << matrix.num_rows << '\n';
-    }
 
     // Generate a random vector
     std::default_random_engine eng{};
     std::uniform_real_distribution<> dist{1, 100};
-    auto gen_random = [&]() { return dist(eng); };
+    auto gen_random = [&dist, &eng]() mutable { return (float)dist(eng); };
 
-    // std::for_each(vector.begin(), vector.end(), gen_random());
     srand(time(NULL));
-    for (int i = 0; i < matrix.num_rows; i++)
-        vector[i] = (float)gen_random();
+    // std::transform(vector.begin(), vector.end(), vector.begin(), gen_random);
+    std::generate(vector.begin(), vector.end(), gen_random);
     std::vector<float> cpu_sol = vector;
     std::vector<float> gpu_sol = vector;
 
@@ -56,11 +51,11 @@ int main(int argc, const char* argv[])
 
     auto err_indices = get_different_results(cpu_sol, gpu_sol);
 
-    std::cout << "errors: " << err_indices.size() << "\n";
-    std::cout << "cpu_time: " << cpu_time << "ns"
-              << "\n";
-    std::cout << "gpu_time: " << gpu_time << "ns"
-              << "\n";
-    std::cout << "cpu_time/gpu_time ratio: " << cpu_time / gpu_time
+    std::cout << "errors: " << err_indices.size() << "\n"
+              << "cpu_time: " << cpu_time << "ns"
+              << "\n"
+              << "gpu_time: " << gpu_time << "ns"
+              << "\n"
+              << "cpu_time/gpu_time ratio: " << cpu_time / gpu_time
               << std::endl;
 }
