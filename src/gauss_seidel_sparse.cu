@@ -70,7 +70,6 @@ __global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
 
         if (dependant_locks[index + i] == false)
         {
-            // unreachable code backward sweep
             warp_found = true;
             *not_terminated = true;
         }
@@ -152,7 +151,6 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
                 continue;
             if (col_ind[j] > (index + i) && !dependant_locks[col_ind[j]])
             {
-                // unreachable code
                 skip_row = true;
                 break;
             }
@@ -165,6 +163,27 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
         sum += vector[index + i] * current_diagonal;
         vector[index + i] = sum / current_diagonal;
         dependant_locks[index + i] = true;
+
+        if (DEBUG_MODE)
+        {
+            if (index + i != 143623)
+                return;
+
+            printf("vector: %f \n row_ptr start: %d \n row_ptr end: %d \n "
+                   "matrix_diagonal: %f \n",
+                   vector[index + i], row_ptr[index + i],
+                   row_ptr[index + i + 1], matrix_diagonal[index + i]);
+
+            for (int j = row_end - 1; j >= row_start; j--)
+            {
+                if (col_ind[j] < 0)
+                    continue;
+                if (col_ind[j] > (index + i) && !dependant_locks[col_ind[j]])
+                    break;
+                printf("martix_value: %f \n vector[col_ind]: %f \n", matrix[j],
+                       vector[col_ind[j]]);
+            }
+        }
     }
 }
 
@@ -243,13 +262,15 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
             CHECK(cudaMemcpy(&vector[0], dev_vector,
                              matrix.num_rows * sizeof(T),
                              cudaMemcpyDeviceToHost));
-            dump_vector(vector, 100, "nvidia mode sweep forward");
+            dump_vector(vector, 143623, 143623 + 100,
+                        "nvidia mode sweep forward");
         }
 
         CHECK(
             cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
         not_terminated = true;
 
+        // different result in backward sweep
         while (not_terminated)
         {
             not_terminated = false;
@@ -275,7 +296,8 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
             CHECK(cudaMemcpy(&vector[0], dev_vector,
                              matrix.num_rows * sizeof(T),
                              cudaMemcpyDeviceToHost));
-            dump_vector(vector, 100, "nvidia mode backward sweep");
+            dump_vector(vector, 143623, 143623 + 100,
+                        "nvidia mode backward sweep");
         }
     }
 
