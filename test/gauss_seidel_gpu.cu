@@ -50,7 +50,7 @@ int main(int argc, const char* argv[])
                           .count();
 
     auto err_indices = get_different_results(cpu_sol, gpu_sol);
-    if (DEBUG_MODE)
+    if (DEBUG_MODE && err_indices.size() != 0)
         dump_errors(cpu_sol, gpu_sol, err_indices, 100, "detailed errors");
 
     std::cout << "errors: " << err_indices.size() << "\n"

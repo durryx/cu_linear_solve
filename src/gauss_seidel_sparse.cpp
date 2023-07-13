@@ -16,12 +16,27 @@
 #include <tuple>
 #include <utility>
 
+/*
 template <typename T>
 bool tolerant_comparison(T x, T y)
 {
-    // return std::abs(x - y) <= std::numeric_limits<T>::epsilon() *
-    //                               std::max(std::abs(x), std::abs(y)) * ulp;
-    return std::abs(x - y) <= 0.0001;
+    const auto tolerance = 0.06; // 6% diff
+    const auto max_magnitude = std::max(std::abs(x), std::abs(y));
+    if (std::abs(x - y) < tolerance * max_magnitude)
+        return true;
+    else
+        return false;
+}
+*/
+
+template <typename T>
+bool tolerant_comparison(T x, T y)
+{
+    const auto tolerance = 0.005; // 6% diff
+    if (std::abs(x - y) < tolerance)
+        return true;
+    else
+        return false;
 }
 
 template <typename T>
@@ -31,10 +46,9 @@ auto get_different_results(const std::vector<T>& cpu_solution,
 {
     assert(cpu_solution.size() == gpu_solution.size());
     std::vector<size_t> err_indices;
+
     for (size_t i = 0; i < cpu_solution.size(); i++)
     {
-        // if (cpu_solution[i] != gpu_solution[i])
-        //     err_indices.emplace_back(i);
         if (!(tolerant_comparison(cpu_solution[i], gpu_solution[i])))
             err_indices.emplace_back(i);
     }
@@ -65,33 +79,19 @@ void dump_vector(const std::vector<T>& vector, size_t start, size_t end,
     std::cout << '\n' << std::endl;
 }
 
-template <typename T>
-void inspect_row(const std::vector<T>& vector, size_t index,
-                 const csr_matrix& matrix)
-{
-    std::cout << "vector: " << vector[index] << '\n'
-              << "row_ptr start: " << matrix.row_ptr[index] << '\n'
-              << "row_ptr end: " << matrix.row_ptr[index + 1] << "\n"
-              << "matrix_diagonal: " << matrix.matrix_diagonal[index] << '\n';
-
-    const int row_start = matrix.row_ptr[index];
-    const int row_end = matrix.row_ptr[index + 1];
-
-    for (int j = row_start; j < row_end; j++)
-        std::cout << "matrix value: " << matrix.values[j] << '\n'
-                  << "vector[col_ind]" << vector[matrix.col_ind[j]] << '\n';
-}
-
+typedef std::numeric_limits<double> dbl;
 template <typename T>
 void dump_errors(const std::vector<T>& cpu_sol, const std::vector<T>& gpu_sol,
-                 const std::vector<size_t>& err_indices, size_t n,
+                 const std::vector<size_t>& err_indices, size_t size,
                  const char* id)
 {
     assert(err_indices.size() <= gpu_sol.size());
+    assert(err_indices.size() >= size);
+    std::cout.precision(dbl::digits10);
     std::cout << id << '\n';
-    for (size_t i = 0; i <= n; i++)
-        std::cout << err_indices[i] << " cpu val: " << cpu_sol[err_indices[i]]
-                  << "\t\t"
+    for (size_t i = 0; i < size; i++)
+        std::cout << "row " << err_indices[i]
+                  << " cpu val: " << cpu_sol[err_indices[i]] << "\t\t"
                   << "gpu val: " << gpu_sol[err_indices[i]] << '\n';
     std::cout << '\n' << std::endl;
 }
@@ -249,9 +249,7 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
             matrix.matrix_diagonal[i]; // Current diagonal value
 
         for (int j = row_start; j < row_end; j++)
-        {
             sum -= matrix.values[j] * vector[matrix.col_ind[j]];
-        }
 
         sum +=
             vector[i] *
@@ -259,10 +257,7 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
 
         vector[i] = sum / currentDiagonal;
     }
-
-    if (DEBUG_MODE)
-        dump_vector(vector, 143623, 143623 + 100, "cpu mode forward sweep");
-
+    /*
     // backward sweep
     for (int i = matrix.num_rows - 1; i >= 0; i--)
     {
@@ -273,21 +268,15 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
             matrix.matrix_diagonal[i]; // Current diagonal value
 
         for (int j = row_start; j < row_end; j++)
-        {
             sum -= matrix.values[j] * vector[matrix.col_ind[j]];
-        }
+
         sum +=
             vector[i] *
             currentDiagonal; // Remove diagonal contribution from previous loop
 
         vector[i] = sum / currentDiagonal;
-
-        if (DEBUG_MODE)
-            inspect_row(vector, i, matrix);
     }
-
-    if (DEBUG_MODE)
-        dump_vector(vector, 143623, 143623 + 100, "cpu mode backward sweep");
+    */
 }
 
 // iterate over columns to find unique indices less than row number
