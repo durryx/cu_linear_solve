@@ -257,7 +257,7 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
 
         vector[i] = sum / currentDiagonal;
     }
-    /*
+
     // backward sweep
     for (int i = matrix.num_rows - 1; i >= 0; i--)
     {
@@ -276,7 +276,6 @@ void symgs_csr_sw(csr_matrix& matrix, std::vector<T>& vector)
 
         vector[i] = sum / currentDiagonal;
     }
-    */
 }
 
 // iterate over columns to find unique indices less than row number

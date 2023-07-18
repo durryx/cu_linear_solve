@@ -5,8 +5,9 @@
 #include <sys/time.h>
 #include <time.h>
 
+// #define BLOCKN 10240
 #define THREADN 320
-#define CHUNKSN 10
+#define CALLSN 10
 #define LINESPERTHREAD 8
 
 #define CHECK(call)                                                            \
@@ -54,6 +55,8 @@ void read_matrix(int** row_ptr, int** col_ind, float** values,
     if (fscanf(file, "%d %d %d\n", num_rows, num_cols, num_vals) == EOF)
         printf("Error reading file");
 
+    // printf("Rows: %d, Columns:%d, NNZ:%d\n", *num_rows, *num_cols,
+    // *num_vals);
     int* row_ptr_t = (int*)malloc((*num_rows + 1) * sizeof(int));
     int* col_ind_t = (int*)malloc(*num_vals * sizeof(int));
     float* values_t = (float*)malloc(*num_vals * sizeof(float));
@@ -235,7 +238,6 @@ __global__ void symgs_csr_gpu_forward(const int* row_ptr, const int* col_ind,
                 sum -= (float)(((double)values[j]) * ((double)x[col_index]));
             }
         }
-        // if I had to break from previous loop: skip setting new value
         if (missed)
             continue;
 
@@ -245,6 +247,7 @@ __global__ void symgs_csr_gpu_forward(const int* row_ptr, const int* col_ind,
     }
 }
 
+// GPU implementation of SYMGS using CSR
 __global__ void symgs_csr_gpu_backward(const int* row_ptr, const int* col_ind,
                                        const float* values, const int num_rows,
                                        float* x, float* matrixDiagonal,
@@ -309,7 +312,6 @@ __global__ void symgs_csr_gpu_backward(const int* row_ptr, const int* col_ind,
                 sum -= (float)((double)values[j] * (double)x2[col_index]);
             }
         }
-        // if I had to break from previous loop: skip setting new value
         if (missed)
             continue;
 
@@ -321,17 +323,19 @@ __global__ void symgs_csr_gpu_backward(const int* row_ptr, const int* col_ind,
 
 int main(int argc, const char* argv[])
 {
-    if (argc != 2)
-    {
+    printf("Configs: THREADN = %d, CALLSN = %d, LINESPERTHREAD = %d\n", THREADN,
+           CALLSN, LINESPERTHREAD);
+    /* if (argc != 2){
         printf("Usage: ./exec matrix_file");
         return 0;
-    }
+    } */
 
     int *row_ptr, *col_ind, num_rows, num_cols, num_vals;
     float* values;
     float* matrixDiagonal;
 
     const char* filename = argv[1];
+    filename = "kmer_V4a.mtx";
 
     double start_cpu, end_cpu;
     double start_gpu, end_gpu;
@@ -351,27 +355,40 @@ int main(int argc, const char* argv[])
         xCopy[i] = x[i];
     }
 
-    // ############################ cpu part ############################
+    /* for(int i = 0; i < num_vals; i++){
+        if(col_ind[i] < 0 || col_ind[i] > num_rows - 1){
+            printf("%d, %d\n", i, col_ind[i]);
+            assert(0);
+            return 1;
+        }
+    }*/
+
+    // Compute in sw
     start_cpu = get_time();
-    printf("rows: %d\n", num_rows);
     symgs_csr_sw(row_ptr, col_ind, values, num_rows, x, matrixDiagonal);
     end_cpu = get_time();
 
-    // ############################ gpu part ############################
+    // gpu part
 
     int blockN = num_rows / (THREADN * LINESPERTHREAD) + 1;
+    printf("BlockN: %d\n", blockN);
+
+    // needed because there might be excess blocks in chunck calculation
+    while (blockN * THREADN * LINESPERTHREAD > num_rows)
+        blockN--;
+    blockN++; // there might be a last block that is only partially useful
 
     // allocate space
     int *dev_row_ptr, *dev_col_ind;
     float *dev_values, *dev_x, *dev_matrixDiagonal, *dev_x2;
-    char *dev_semaphores, *dev_not_done, *dev_thread_done;
+    char *dev_locks, *dev_not_done, *dev_thread_done;
     CHECK(cudaMalloc(&dev_row_ptr, (num_rows + 1) * sizeof(int)));
     CHECK(cudaMalloc(&dev_col_ind, num_vals * sizeof(int)));
     CHECK(cudaMalloc(&dev_values, num_vals * sizeof(float)));
     CHECK(cudaMalloc(&dev_x, num_rows * sizeof(float)));
     CHECK(cudaMalloc(&dev_matrixDiagonal, num_rows * sizeof(float)));
     CHECK(cudaMalloc(&dev_x2, num_rows * sizeof(float)));
-    CHECK(cudaMalloc(&dev_semaphores, num_rows * sizeof(char)));
+    CHECK(cudaMalloc(&dev_locks, num_rows * sizeof(char)));
     CHECK(cudaMalloc(&dev_not_done, sizeof(char)));
     CHECK(cudaMalloc(&dev_thread_done, (blockN * THREADN) * sizeof(char)));
 
@@ -386,57 +403,52 @@ int main(int argc, const char* argv[])
     CHECK(cudaMemcpy(dev_matrixDiagonal, matrixDiagonal,
                      num_rows * sizeof(float), cudaMemcpyHostToDevice));
 
-    // initialize lock and done vectors to all 0 in host then copy to device
-    char* host_semaphores = (char*)calloc(num_rows, sizeof(char));
+    // initialize lock vector to all 0 in host then copy to device
+    char* host_locks = (char*)calloc(num_rows, sizeof(char));
     char* host_thread_done = (char*)calloc((blockN * THREADN), sizeof(char));
-    CHECK(cudaMemcpy(dev_semaphores, host_semaphores, num_rows * sizeof(char),
+    CHECK(cudaMemcpy(dev_locks, host_locks, num_rows * sizeof(char),
                      cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_thread_done, host_thread_done,
                      (blockN * THREADN) * sizeof(char),
                      cudaMemcpyHostToDevice));
 
+    dim3 threadsPerBlock(THREADN, 1, 1);
+
     // compute in gpu
     start_gpu = get_time();
 
-    dim3 threadsPerBlock(THREADN, 1, 1);
-
-    // divide forward and backward sweep into chunks, rerun each chunk until all
-    // values have been found forward sweep
+    // forward sweep
     int blocksToCompute = blockN;
-    int ciao = 0;
-    for (int i = 0; i < CHUNKSN; i++)
+    for (int i = 0; i < CALLSN; i++)
     {
-        int blocksInRound = blocksToCompute / (CHUNKSN - i);
+        int blocksInRound = blocksToCompute / (CALLSN - i);
         dim3 blocksPerGrid(blocksInRound, 1, 1);
         char not_done;
         do
         {
-            // reset not done to 0 in gpu for every cycle
             not_done = 0;
             CHECK(cudaMemcpy(dev_not_done, &not_done, sizeof(char),
                              cudaMemcpyHostToDevice));
 
             symgs_csr_gpu_forward<<<blocksPerGrid, threadsPerBlock>>>(
                 dev_row_ptr, dev_col_ind, dev_values, num_rows, dev_x,
-                dev_matrixDiagonal, dev_x2, dev_semaphores, dev_not_done,
+                dev_matrixDiagonal, dev_x2, dev_locks, dev_not_done,
                 dev_thread_done, (blockN - blocksToCompute) * THREADN);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
             CHECK(cudaMemcpy(&not_done, dev_not_done, sizeof(char),
                              cudaMemcpyDeviceToHost));
-            ciao++;
         } while (not_done);
-        printf("%d  ", ciao);
 
         blocksToCompute -= blocksInRound;
     }
 
     // backward sweep
     blocksToCompute = blockN;
-    for (int i = 0; i < CHUNKSN; i++)
+    for (int i = 0; i < CALLSN; i++)
     {
-        int blocksInRound = blocksToCompute / (CHUNKSN - i);
+        int blocksInRound = blocksToCompute / (CALLSN - i);
         dim3 blocksPerGrid(blocksInRound, 1, 1);
         blocksToCompute -= blocksInRound;
 
@@ -449,7 +461,7 @@ int main(int argc, const char* argv[])
 
             symgs_csr_gpu_backward<<<blocksPerGrid, threadsPerBlock>>>(
                 dev_row_ptr, dev_col_ind, dev_values, num_rows, dev_x,
-                dev_matrixDiagonal, dev_x2, dev_semaphores, dev_not_done,
+                dev_matrixDiagonal, dev_x2, dev_locks, dev_not_done,
                 dev_thread_done, (blocksToCompute)*THREADN);
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
@@ -464,8 +476,6 @@ int main(int argc, const char* argv[])
     CHECK(cudaMemcpy(xCopy, dev_x, num_rows * sizeof(float),
                      cudaMemcpyDeviceToHost));
 
-    // check for errors, sensibility is needed because gpu values slightly
-    // differ
     int errors = 0;
     float maxError = 0.0;
     for (int i = 0; i < num_rows; i++)
@@ -496,8 +506,6 @@ int main(int argc, const char* argv[])
     free(matrixDiagonal);
     free(x);
     free(xCopy);
-    free(host_semaphores);
-    free(host_thread_done);
 
     CHECK(cudaFree(dev_row_ptr));
     CHECK(cudaFree(dev_col_ind));
@@ -505,9 +513,7 @@ int main(int argc, const char* argv[])
     CHECK(cudaFree(dev_x));
     CHECK(cudaFree(dev_matrixDiagonal));
     CHECK(cudaFree(dev_x2));
-    CHECK(cudaFree(dev_semaphores));
-    CHECK(cudaFree(dev_thread_done));
-    CHECK(cudaFree(dev_not_done));
+    CHECK(cudaFree(dev_locks));
 
     return 0;
 }
