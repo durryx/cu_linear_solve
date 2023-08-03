@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <type_traits>
 #include <vector>
 
 // compile with -DDEBUG_MODE=1 or define this macro variable
@@ -44,7 +45,7 @@ int main(int argc, const char* argv[])
 
     int device;
     cudaGetDevice(&device);
-    gauss_seidel_sparse_solve(matrix, gpu_sol, device);
+    gauss_seidel_sparse_solve<float, 10>(matrix, gpu_sol, device);
     double gpu_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::high_resolution_clock::now() - t1)
                           .count();
