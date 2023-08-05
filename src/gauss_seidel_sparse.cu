@@ -6,8 +6,8 @@
 #include <vector>
 // #include <helper_cuda.h>
 #include <algorithm>
-#include <cuda/std/atomic>
 #include <iostream>
+#include <optional>
 #include <type_traits>
 
 #define CHECK(call)                                                            \
@@ -54,11 +54,15 @@ __global__ void check_row_locks(const int* row_ptr, const int* col_ind,
 */
 
 // use this to calculate active warps using registers sharing
-// recast bool/int array to a bigger value and check if == 0
-// does not work for n > 1
+// recast bool/int array to a bigger value and check if == 0 see if can create
+// pointer of certain bytes here
+// memory coalescence
+
+// template <typename T, size_t size>
+// __constant__ T vector_copy_test[size];
 
 template <typename T, size_t n>
-__global__ void rows_lock_check(const int num_rows, const int* dependant_locks,
+__global__ void rows_lock_check(const int num_rows, const bool* dependant_locks,
                                 int* not_terminated)
 {
     int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
@@ -87,17 +91,27 @@ __global__ void rows_lock_check(const int num_rows, const int* dependant_locks,
             warp_found = true;
 
         i++;
-        __syncthreads();
+        if constexpr (n > 1)
+            __syncthreads();
     }
 }
 
+// check if warp is empty or calculate minimum row dependency index with
+// recduction
 template <typename T, size_t n>
 __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
                                 const T* matrix, const int num_rows,
                                 const T* matrix_diagonal, T* vector,
-                                T* vector_copy, int* dependant_locks)
+                                T* vector_copy, bool* dependant_locks)
 {
     int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
+
+    /*
+    volatile __shared__ int warp_idle;
+    if (threadIdx.x == 0)
+        warp_idle = 0;
+    __syncthreads();
+    */
 
     for (size_t i = 0; i < n; i++)
     {
@@ -128,21 +142,17 @@ __global__ void sweep_forward_n(const int* row_ptr, const int* col_ind,
         }
 
         if (skip_row)
+        {
             continue;
+            /*
+            write to warp_idle
+            */
+        }
 
         T current_diagonal = matrix_diagonal[index + i];
         sum += vector_copy[index + i] * current_diagonal;
         vector[index + i] = sum / current_diagonal;
-        //__threadfence_block();
-        //__syncthreads();
-
-        // int retval = atomicCAS(&dependant_locks[index + i], 0, true);
-        // assert(retval != true);
         dependant_locks[index + i] = true;
-
-        // sync all threads here
-        // if constexpr (n > 1)
-        //     __threadfence();
     }
 }
 
@@ -150,7 +160,7 @@ template <typename T, size_t n>
 __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
                              const T* matrix, const int num_rows,
                              const T* matrix_diagonal, T* vector,
-                             T* vector_copy, int* dependant_locks)
+                             T* vector_copy, bool* dependant_locks)
 {
     int index = n * (blockIdx.x * blockDim.x + threadIdx.x);
 
@@ -193,13 +203,14 @@ __global__ void sweep_back_n(const int* row_ptr, const int* col_ind,
     }
 }
 
-template <typename T>
+template <typename T, size_t conseq_iterations>
 void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                                int device)
 {
-    int *dev_row_ptr, *dev_col_ind, *dev_dependant_locks, *dev_not_terminated;
+    int *dev_row_ptr, *dev_col_ind;
+    int* dev_not_terminated;
     T *dev_matrix, *dev_vector, *dev_matrix_diagonal, *dev_vector_copy;
-    // bool* dev_not_terminated;
+    bool* dev_dependant_locks;
 
     CHECK(cudaMalloc(&dev_row_ptr, (matrix.num_rows + 1) * sizeof(int)));
     CHECK(cudaMalloc(&dev_col_ind, matrix.num_vals * sizeof(int)));
@@ -207,7 +218,7 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
     CHECK(cudaMalloc(&dev_vector, matrix.num_rows * sizeof(T)));
     CHECK(cudaMalloc(&dev_vector_copy, matrix.num_rows * sizeof(T)));
     CHECK(cudaMalloc(&dev_matrix_diagonal, matrix.num_rows * sizeof(T)));
-    CHECK(cudaMalloc(&dev_dependant_locks, matrix.num_rows * sizeof(int)));
+    CHECK(cudaMalloc(&dev_dependant_locks, matrix.num_rows * sizeof(bool)));
     CHECK(cudaMalloc(&dev_not_terminated, sizeof(int)));
 
     CHECK(cudaMemcpy(dev_row_ptr, matrix.row_ptr,
@@ -223,7 +234,10 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
                      matrix.num_rows * sizeof(T), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dev_matrix_diagonal, matrix.matrix_diagonal,
                      matrix.num_rows * sizeof(T), cudaMemcpyHostToDevice));
-    CHECK(cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(int)));
+    CHECK(cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
+
+    // CHECK(cudaMemcpyToSymbol(vector_copy_test<T, 5>, vector.data(),
+    //                          matrix.num_rows * sizeof(T)));
 
     int driver_version = 0;
     int memory_pools = 0;
@@ -232,7 +246,8 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
     cudaDriverGetVersion(&driver_version);
 
     constexpr size_t n = 4;
-    int blocks = ceil(matrix.num_rows / (n * 128)) + 1;
+    int blocks = ceil((float)matrix.num_rows / (n * 128));
+    // int blocks = (matrix.num_rows + (n*128) - 1)/(n*128);
     dim3 threads_per_block(128, 1, 1);
     dim3 blocks_per_grid(blocks, 1, 1);
 
@@ -242,7 +257,24 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
     }
     else
     {
-        bool not_terminated = true;
+        for (size_t i = 0; i <= conseq_iterations; i++)
+        {
+            sweep_forward_n<T, n><<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
+                dev_matrix_diagonal, dev_vector, dev_vector_copy,
+                dev_dependant_locks);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+        }
+
+        int not_terminated = false;
+        rows_lock_check<T, n><<<blocks_per_grid, threads_per_block>>>(
+            matrix.num_rows, dev_dependant_locks, dev_not_terminated);
+        CHECK_KERNELCALL();
+        CHECK(cudaDeviceSynchronize());
+        CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(int),
+                         cudaMemcpyDeviceToHost));
+
         while (not_terminated)
         {
             not_terminated = false;
@@ -269,15 +301,31 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
 
         CHECK(cudaMemcpy(dev_vector_copy, dev_vector, sizeof(T) * vector.size(),
                          cudaMemcpyDeviceToDevice))
-
         CHECK(
-            cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(int)));
-        not_terminated = true;
+            cudaMemset(dev_dependant_locks, 0, matrix.num_rows * sizeof(bool)));
+
+        for (size_t i = 0; i <= conseq_iterations; i++)
+        {
+
+            sweep_back_n<T, n><<<blocks_per_grid, threads_per_block>>>(
+                dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
+                dev_matrix_diagonal, dev_vector, dev_vector_copy,
+                dev_dependant_locks);
+            CHECK_KERNELCALL();
+            CHECK(cudaDeviceSynchronize());
+        }
+        not_terminated = false;
+        rows_lock_check<T, n><<<blocks_per_grid, threads_per_block>>>(
+            matrix.num_rows, dev_dependant_locks, dev_not_terminated);
+        CHECK_KERNELCALL();
+        CHECK(cudaDeviceSynchronize());
+        CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(int),
+                         cudaMemcpyDeviceToHost));
 
         while (not_terminated)
         {
             not_terminated = false;
-            CHECK(cudaMemset(dev_not_terminated, false, sizeof(bool)));
+            CHECK(cudaMemset(dev_not_terminated, false, sizeof(int)));
 
             sweep_back_n<T, n><<<blocks_per_grid, threads_per_block>>>(
                 dev_row_ptr, dev_col_ind, dev_matrix, matrix.num_rows,
@@ -291,7 +339,7 @@ void gauss_seidel_sparse_solve(csr_matrix& matrix, std::vector<T>& vector,
             CHECK_KERNELCALL();
             CHECK(cudaDeviceSynchronize());
 
-            CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(bool),
+            CHECK(cudaMemcpy(&not_terminated, dev_not_terminated, sizeof(int),
                              cudaMemcpyDeviceToHost));
         }
     }
